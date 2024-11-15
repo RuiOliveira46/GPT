@@ -12,9 +12,9 @@ import queue
 from typing import Union, AsyncIterator, Iterator
 
 from ..providers.base_provider import AsyncGeneratorProvider
-from ..image import ImageResponse, to_image, to_data_uri
+from ..image import ImageResponse, to_image
 from ..typing import Messages, ImageType
-from ..providers.types import BaseProvider, ProviderType, FinishReason
+from ..providers.types import ProviderType, FinishReason
 from ..providers.conversation import BaseConversation
 from ..image import ImageResponse as ImageProviderResponse
 from ..errors import NoImageResponseError
@@ -24,7 +24,6 @@ from .types import IterResponse, ImageProvider
 from .types import Client as BaseClient
 from .service import get_model_and_provider, get_last_provider
 from .helper import find_stop, filter_json, filter_none
-from ..models import ModelUtils
 from ..Provider import IterListProvider
 
 # Helper function to convert an async generator to a synchronous iterator
@@ -137,32 +136,6 @@ class Client(BaseClient):
     def images(self) -> Images:
         return self._images
 
-    async def async_images(self) -> Images:
-        return self._images
-
-# For backwards compatibility and legacy purposes, use Client instead
-class AsyncClient(Client):
-    """Legacy AsyncClient that redirects to the main Client class.
-    This class exists for backwards compatibility."""
-    
-    def __init__(self, *args, **kwargs):
-        import warnings
-        warnings.warn(
-            "AsyncClient is deprecated and will be removed in a future version. "
-            "Use Client instead, which now supports both sync and async operations.",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        super().__init__(*args, **kwargs)
-
-    async def chat_complete(self, *args, **kwargs):
-        """Legacy method that redirects to async_create"""
-        return await self.chat.completions.async_create(*args, **kwargs)
-
-    async def create_image(self, *args, **kwargs):
-        """Legacy method that redirects to async_generate"""
-        return await self.images.async_generate(*args, **kwargs)
-
 class Completions:
     def __init__(self, client: Client, provider: ProviderType = None):
         self.client: Client = client
@@ -183,7 +156,7 @@ class Completions:
         ignore_working: bool = False,
         ignore_stream: bool = False,
         **kwargs
-    ) -> Union[ChatCompletion, Iterator[ChatCompletionChunk]]:
+    ) -> IterResponse:
         model, provider = get_model_and_provider(
             model,
             self.provider if provider is None else provider,
@@ -240,139 +213,11 @@ class Completions:
             response = iter_append_model_and_provider(response)
             return next(response)
 
-    async def async_create(
-        self,
-        messages: Messages,
-        model: str,
-        provider: ProviderType = None,
-        stream: bool = False,
-        proxy: str = None,
-        response_format: dict = None,
-        max_tokens: int = None,
-        stop: Union[list[str], str] = None,
-        api_key: str = None,
-        ignored: list[str] = None,
-        ignore_working: bool = False,
-        ignore_stream: bool = False,
-        **kwargs
-    ) -> Union[ChatCompletion, AsyncIterator[ChatCompletionChunk]]:
-        model, provider = get_model_and_provider(
-            model,
-            self.provider if provider is None else provider,
-            stream,
-            ignored,
-            ignore_working,
-            ignore_stream,
-        )
-
-        stop = [stop] if isinstance(stop, str) else stop
-
-        if asyncio.iscoroutinefunction(provider.create_completion):
-            response = await provider.create_completion(
-                model,
-                messages,
-                stream=stream,
-                **filter_none(
-                    proxy=self.client.get_proxy() if proxy is None else proxy,
-                    max_tokens=max_tokens,
-                    stop=stop,
-                    api_key=self.client.api_key if api_key is None else api_key
-                ),
-                **kwargs
-            )
-        else:
-            response = provider.create_completion(
-                model,
-                messages,
-                stream=stream,
-                **filter_none(
-                    proxy=self.client.get_proxy() if proxy is None else proxy,
-                    max_tokens=max_tokens,
-                    stop=stop,
-                    api_key=self.client.api_key if api_key is None else api_key
-                ),
-                **kwargs
-            )
-
-        # Removed 'await' here since 'async_iter_response' returns an async generator
-        response = async_iter_response(response, stream, response_format, max_tokens, stop)
-        response = async_iter_append_model_and_provider(response)
-
-        if stream:
-            return response
-        else:
-            async for result in response:
-                return result
-
 class Chat:
     completions: Completions
 
     def __init__(self, client: Client, provider: ProviderType = None):
         self.completions = Completions(client, provider)
-
-# Asynchronous versions of the helper functions
-async def async_iter_response(
-    response: Union[AsyncIterator[str], Iterator[str]],
-    stream: bool,
-    response_format: dict = None,
-    max_tokens: int = None,
-    stop: list = None
-) -> AsyncIterator[Union[ChatCompletion, ChatCompletionChunk]]:
-    content = ""
-    finish_reason = None
-    completion_id = ''.join(random.choices(string.ascii_letters + string.digits, k=28))
-    idx = 0
-
-    if not hasattr(response, '__aiter__'):
-        response = to_async_iterator(response)
-
-    async for chunk in response:
-        if isinstance(chunk, FinishReason):
-            finish_reason = chunk.reason
-            break
-        elif isinstance(chunk, BaseConversation):
-            yield chunk
-            continue
-
-        content += str(chunk)
-
-        if max_tokens is not None and idx + 1 >= max_tokens:
-            finish_reason = "length"
-
-        first, content, chunk = find_stop(stop, content, chunk if stream else None)
-
-        if first != -1:
-            finish_reason = "stop"
-
-        if stream:
-            yield ChatCompletionChunk(chunk, None, completion_id, int(time.time()))
-
-        if finish_reason is not None:
-            break
-
-        idx += 1
-
-    finish_reason = "stop" if finish_reason is None else finish_reason
-
-    if stream:
-        yield ChatCompletionChunk(None, finish_reason, completion_id, int(time.time()))
-    else:
-        if response_format is not None and "type" in response_format:
-            if response_format["type"] == "json_object":
-                content = filter_json(content)
-        yield ChatCompletion(content, finish_reason, completion_id, int(time.time()))
-
-async def async_iter_append_model_and_provider(response: AsyncIterator) -> AsyncIterator:
-    last_provider = None
-
-    if not hasattr(response, '__aiter__'):
-        response = to_async_iterator(response)
-
-    async for chunk in response:
-        last_provider = get_last_provider(True) if last_provider is None else last_provider
-        chunk.model = last_provider.get("model")
-        chunk.provider = last_provider.get("name")
-        yield chunk
 
 async def iter_image_response(response: AsyncIterator) -> Union[ImagesResponse, None]:
     response_list = []

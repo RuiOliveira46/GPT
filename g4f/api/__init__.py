@@ -18,7 +18,7 @@ from typing import Union, Optional, Iterator
 
 import g4f
 import g4f.debug
-from g4f.client import Client, ChatCompletion, ChatCompletionChunk, ImagesResponse
+from g4f.client import AsyncClient, ChatCompletion, ImagesResponse
 from g4f.typing import Messages
 from g4f.cookies import read_cookie_files
 
@@ -84,7 +84,7 @@ def set_list_ignored_providers(ignored: list[str]):
 class Api:
     def __init__(self, app: FastAPI, g4f_api_key=None) -> None:
         self.app = app
-        self.client = Client()
+        self.client = AsyncClient()
         self.g4f_api_key = g4f_api_key
         self.get_g4f_api_key = APIKeyHeader(name="g4f-api-key")
 
@@ -184,15 +184,8 @@ class Api:
                     ignored=AppConfig.ignored_providers
                 )
 
-                # Check if the response is synchronous or asynchronous
-                if isinstance(response, ChatCompletion):
-                    # Synchronous response
-                    return JSONResponse(response.to_json())
-
                 if not config.stream:
-                    # If the response is an iterator but not streaming, collect the result
-                    response_list = list(response) if isinstance(response, Iterator) else [response]
-                    return JSONResponse(response_list[0].to_json())
+                    return JSONResponse(await response.to_json())
 
                 # Streaming response
                 async def streaming():
@@ -215,7 +208,7 @@ class Api:
         @self.app.post("/v1/images/generate")
         async def generate_image(config: ImageGenerationConfig):
             try:
-                response: ImagesResponse = await self.client.images.async_generate(
+                response: ImagesResponse = await self.client.images.generate(
                     prompt=config.prompt,
                     model=config.model,
                     response_format=config.response_format
